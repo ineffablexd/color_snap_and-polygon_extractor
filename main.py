@@ -54,14 +54,6 @@ class PluginDialog(QDialog):
             self.pick_btn.setText(f"RGB: {self.color}")
             self.log(f"🎨 Picked: {self.color}")
 
-    # 🔥 Boundary detector
-    def is_boundary(self, px, py, region_set):
-        neighbors = [
-            (px+1, py), (px-1, py),
-            (px, py+1), (px, py-1)
-        ]
-        return any(n not in region_set for n in neighbors)
-
     def run_extraction(self):
         try:
             self.log("🚀 Capturing canvas...")
@@ -119,55 +111,39 @@ class PluginDialog(QDialog):
                             (px, py+1), (px, py-1)
                         ])
 
-                    if len(region) > 200:
+                    if len(region) > 100:
                         regions.append(region)
 
             self.log(f"Regions found: {len(regions)}")
 
-            # 🔥 KEEP BIGGEST REGION (optional but useful)
-            if not regions:
-                self.log("❌ No regions detected")
-                return
-
-            regions = sorted(regions, key=len, reverse=True)[:1]
-
-            # 🔥 CRS FIX
+            # 🔥 CORRECT CRS FROM CANVAS
             crs = self.canvas.mapSettings().destinationCrs().authid()
             vl = QgsVectorLayer(f"Polygon?crs={crs}", "Extracted", "memory")
             pr = vl.dataProvider()
 
+            # 🔥 CORRECT TRANSFORM
             map_settings = self.canvas.mapSettings()
             transform = map_settings.mapToPixel()
 
             for region in regions:
-                region_set = set(region)
-
-                # 🔥 EXTRACT ONLY BOUNDARY
-                boundary = [p for p in region if self.is_boundary(p[0], p[1], region_set)]
-
                 pts = []
 
-                for x, y in boundary[::3]:  # sampling
+                # reduce density for cleaner shapes
+                for x, y in region[::8]:
                     map_pt = transform.toMapCoordinates(x, y)
                     pts.append(QgsPointXY(map_pt))
 
                 if len(pts) < 3:
                     continue
 
-                geom = QgsGeometry.fromPolygonXY([pts])
-
-                # 🔥 CLEAN GEOMETRY
-                geom = geom.simplify(2)   # remove zig-zag
-                geom = geom.smooth(3)     # smooth curves
-
                 feat = QgsFeature()
-                feat.setGeometry(geom)
+                feat.setGeometry(QgsGeometry.fromPolygonXY([pts]))
                 pr.addFeature(feat)
 
             vl.updateExtents()
             QgsProject.instance().addMapLayer(vl)
 
-            self.log("✅ Clean polygon created")
+            self.log("✅ Extraction complete")
 
         except Exception:
             self.log("💥 ERROR:")
