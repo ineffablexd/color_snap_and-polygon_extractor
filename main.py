@@ -126,19 +126,59 @@ class PluginDialog(QDialog):
             transform = map_settings.mapToPixel()
 
             for region in regions:
-                pts = []
-
-                # reduce density for cleaner shapes
-                for x, y in region[::8]:
-                    map_pt = transform.toMapCoordinates(x, y)
-                    pts.append(QgsPointXY(map_pt))
-
-                if len(pts) < 3:
+                if len(region) < 10:
                     continue
 
-                feat = QgsFeature()
-                feat.setGeometry(QgsGeometry.fromPolygonXY([pts]))
-                pr.addFeature(feat)
+                # 1. Group pixels by rows (y-coordinate)
+                lines = {}
+                for px, py in region:
+                    if py not in lines:
+                        lines[py] = []
+                    lines[py].append(px)
+
+                # 2. Find contiguous horizontal segments
+                polygons = []
+                for py, x_coords in lines.items():
+                    x_coords.sort()
+                    start = x_coords[0]
+                    prev = start
+
+                    segments = []
+                    for i in range(1, len(x_coords)):
+                        x = x_coords[i]
+                        if x == prev + 1:
+                            prev = x
+                        else:
+                            segments.append((start, py, prev, py))
+                            start = x
+                            prev = x
+                    segments.append((start, py, prev, py))
+
+                    # 3. Create map geometry for each segment
+                    for (startX, startY, endX, endY) in segments:
+                        p1 = transform.toMapCoordinates(startX, startY)
+                        p2 = transform.toMapCoordinates(endX + 1, startY)
+                        p3 = transform.toMapCoordinates(endX + 1, startY + 1)
+                        p4 = transform.toMapCoordinates(startX, startY + 1)
+
+                        poly = QgsGeometry.fromPolygonXY([[
+                            QgsPointXY(p1), QgsPointXY(p2), 
+                            QgsPointXY(p3), QgsPointXY(p4)
+                        ]])
+                        polygons.append(poly)
+
+                if not polygons:
+                    continue
+
+                # 4. Union all segments to form the final shape
+                combined = QgsGeometry.unaryUnion(polygons)
+
+                # 5. Clean up any tiny gaps or jagged edges by slight buffering (optional but recommended)
+                # Ensure the geometry is valid
+                if combined and not combined.isEmpty():
+                    feat = QgsFeature()
+                    feat.setGeometry(combined)
+                    pr.addFeature(feat)
 
             vl.updateExtents()
             QgsProject.instance().addMapLayer(vl)
