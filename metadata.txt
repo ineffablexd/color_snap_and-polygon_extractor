@@ -1,0 +1,7 @@
+[general]
+name=Color Snap Polygon
+description=Draw polygons snapping to selected color
+version=1.0
+qgisMinimumVersion=3.0
+author=Ineffable
+email=
