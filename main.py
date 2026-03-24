@@ -1,7 +1,8 @@
 from qgis.PyQt.QtWidgets import (
     QAction, QDialog, QVBoxLayout, QLabel,
     QPushButton, QDoubleSpinBox,
-    QColorDialog, QTextEdit, QWidget
+    QColorDialog, QTextEdit, QWidget,
+    QProgressBar, QApplication, QCheckBox
 )
 from qgis.PyQt.QtGui import QColor, QPainter, QBrush
 from qgis.core import (
@@ -33,10 +34,25 @@ class CanvasColorPicker(QgsMapTool):
 
 
 class ColorSwatchList(QWidget):
-    def __init__(self, get_colors):
+    def __init__(self, get_colors, on_select):
         super().__init__()
         self.get_colors = get_colors
+        self.on_select = on_select
+        self.selected_index = 0
         self.setMinimumHeight(50)
+
+    def mousePressEvent(self, e):
+        colors = self.get_colors()
+        if not colors:
+            return
+
+        w = self.width() // len(colors)
+        index = int(e.pos().x() / w)
+
+        if 0 <= index < len(colors):
+            self.selected_index = index
+            self.on_select(index)
+            self.update()
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -52,11 +68,19 @@ class ColorSwatchList(QWidget):
             painter.setPen(Qt.NoPen)
             painter.drawRect(i * w, 0, w, self.height())
 
+            # highlight selected
+            if i == self.selected_index:
+                painter.setPen(QColor(255, 0, 0)) # Red
+                painter.setBrush(Qt.NoBrush)
+                width = 3
+                painter.drawRect(i * w + width, width, w - 2*width, self.height() - 2*width)
+
 
 class TolerancePreview(QWidget):
-    def __init__(self, get_color):
+    def __init__(self, get_color, get_selected_index):
         super().__init__()
         self.get_color = get_color
+        self.get_selected_index = get_selected_index
         self.setMinimumHeight(50)
         self.min_factor = 0.25
         self.max_factor = 0.75
@@ -69,8 +93,11 @@ class TolerancePreview(QWidget):
         if not colors:
             return
 
-        # Use last selected color
-        r, g, b = colors[-1]
+        # Use selected color
+        idx = self.get_selected_index()
+        if idx >= len(colors):
+            idx = len(colors) - 1
+        r, g, b = colors[idx]
 
         # Convert to HSV
         h, s, v = colorsys.rgb_to_hsv(r/255, g/255, b/255)
@@ -124,21 +151,29 @@ class PluginDialog(QDialog):
 
         layout = QVBoxLayout()
 
-        self.swatches = ColorSwatchList(lambda: self.colors)
-        self.preview = TolerancePreview(lambda: self.colors)
+        self.selected_color_index = 0
+        self.swatches = ColorSwatchList(lambda: self.colors, self.set_active_color)
+        self.preview = TolerancePreview(lambda: self.colors, lambda: self.selected_color_index)
 
         self.pick_btn = QPushButton("Pick Color")
         self.run_btn = QPushButton("Extract from Canvas")
 
+        self.progress = QProgressBar()
+        self.smooth_checkbox = QCheckBox("Smooth Boundary")
+        self.smooth_checkbox.setChecked(True)
+
         self.log_box = QTextEdit()
         self.log_box.setReadOnly(True)
 
-        layout.addWidget(QLabel("Picked Colors"))
+        layout.addWidget(QLabel("Picked Colors (Click to Select Active)"))
         layout.addWidget(self.swatches)
-        layout.addWidget(QLabel("Tolerance Spectrum (Drag Red Lines)"))
+        layout.addWidget(QLabel("Active Color Tolerance Spectrum"))
         layout.addWidget(self.preview)
+        layout.addWidget(self.smooth_checkbox)
         layout.addWidget(self.pick_btn)
         layout.addWidget(self.run_btn)
+        layout.addWidget(QLabel("Progress"))
+        layout.addWidget(self.progress)
         layout.addWidget(QLabel("Debug Log"))
         layout.addWidget(self.log_box)
 
@@ -149,8 +184,17 @@ class PluginDialog(QDialog):
 
         self.map_tool = None
 
+    def set_active_color(self, index):
+        self.selected_color_index = index
+        self.preview.update()
+        self.log(f"🎯 Switched active color to #{index + 1}")
+
     def log(self, msg):
         self.log_box.append(msg)
+        # keep only last 40 lines
+        lines = self.log_box.toPlainText().split("\n")
+        if len(lines) > 40:
+            self.log_box.setPlainText("\n".join(lines[-40:]))
         print(msg)
 
     def pick_color(self):
@@ -185,25 +229,46 @@ class PluginDialog(QDialog):
             regions = []
 
             def match(x, y):
+                # 1. Direct pixel check
                 c = img.pixelColor(x, y)
                 r2, g2, b2 = c.red(), c.green(), c.blue()
                 h2, s2, v2 = colorsys.rgb_to_hsv(r2/255, g2/255, b2/255)
                 
                 for (r, g, b) in self.colors:
                     h1, s1, v1 = colorsys.rgb_to_hsv(r/255, g/255, b/255)
-                    
-                    # Same color family (handle hue wrap-around)
                     hue_diff = abs(h1 - h2)
                     if hue_diff > 0.5: hue_diff = 1.0 - hue_diff
+                    if hue_diff < 0.05 and factor_min <= v2 <= factor_max:
+                        return True
 
-                    if hue_diff < 0.05:
-                        if factor_min <= v2 <= factor_max:
-                            return True
+                # 2. Neighbor check (fill gaps)
+                for dx in [-1, 0, 1]:
+                    for dy in [-1, 0, 1]:
+                        if dx == 0 and dy == 0: continue
+                        nx, ny = x + dx, y + dy
+                        if 0 <= nx < width and 0 <= ny < height:
+                            cn = img.pixelColor(nx, ny)
+                            rn, gn, bn = cn.red(), cn.green(), cn.blue()
+                            hn, sn, vn = colorsys.rgb_to_hsv(rn/255, gn/255, bn/255)
+                            for (r, g, b) in self.colors:
+                                h1, s1, v1 = colorsys.rgb_to_hsv(r/255, g/255, b/255)
+                                hue_diff = abs(h1 - hn)
+                                if hue_diff > 0.5: hue_diff = 1.0 - hue_diff
+                                if hue_diff < 0.05 and factor_min <= vn <= factor_max:
+                                    return True
                 return False
 
             # 🔥 REGION GROWING
+            total = width * height
+            count = 0
+
             for x in range(width):
                 for y in range(height):
+                    count += 1
+                    if count % 10000 == 0:
+                        self.progress.setValue(int((count / total) * 100))
+                        QApplication.processEvents()
+
                     if (x, y) in visited:
                         continue
                     if not match(x, y):
@@ -230,8 +295,10 @@ class PluginDialog(QDialog):
                             (px, py+1), (px, py-1)
                         ])
 
-                    if len(region) > 100:
+                    if len(region) > 20:
                         regions.append(region)
+
+            self.progress.setValue(100)
 
             self.log(f"Regions found: {len(regions)}")
 
@@ -298,8 +365,15 @@ class PluginDialog(QDialog):
                 combined = QgsGeometry.unaryUnion(region_segments_geoms)
                 
                 # 5. Smooth + Simplify
-                combined = combined.buffer(0.5, 3)
-                combined = combined.simplify(0.3)
+                # 5. Smooth + Simplify
+                if self.smooth_checkbox.isChecked():
+                    combined = combined.buffer(1.0, 8)
+                    combined = combined.buffer(-1.0, 8)
+                    combined = combined.smooth(iterations=2)
+                    combined = combined.simplify(0.8)
+                else:
+                    combined = combined.buffer(0.5, 3)
+                    combined = combined.simplify(0.3)
                 
                 if combined and not combined.isEmpty():
                     all_new_geoms.append(combined)
