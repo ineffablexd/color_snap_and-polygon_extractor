@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/ui_overview.png" alt="Color Snap Polygon Logo" width="120" />
+  <img src="assets/icon.png" alt="Color Snap Polygon Logo" width="120" />
 </p>
 
 # 🎨 Color Snap Polygon `v1.0`
